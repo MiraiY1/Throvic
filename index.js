@@ -31,9 +31,9 @@ const express = require('express');
     // ========================================================================
 
     const nodes = [{
-        name: 'Server-Lokal',
-        url: '127.0.0.1:2333', 
-        auth: 'youshallnotpass', 
+        name: 'Server-External',
+        url: 'lavalink.jirayu.net:13592',
+        auth: 'youshallnotpass',
         secure: false
     }];
 
