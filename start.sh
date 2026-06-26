@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# 1. Perintah untuk download Lavalink.jar otomatis jika filenya belum ada
+# 1. Download Lavalink.jar otomatis jika belum ada
 if [ ! -f Lavalink.jar ]; then
   echo "Mendownload Lavalink.jar dari server resmi..."
-  curl -L https://github.com/lavalink-devs/Lavalink/releases/latest/download/Lavalink.jar -o Lavalink.jar
+  wget -q https://github.com/lavalink-devs/Lavalink/releases/latest/download/Lavalink.jar -O Lavalink.jar
 fi
 
-# 2. Buat folder plugins otomatis dan download plugin YouTube terbaru
+# 2. Buat folder plugins dan download YouTube plugin
 mkdir -p plugins
 if [ ! -f plugins/youtube-plugin-1.18.1.jar ]; then
   echo "Mendownload YouTube Plugin untuk Lavalink..."
-  curl -L "https://github.com/lavalink-devs/youtube-source/releases/download/1.18.1/youtube-plugin-1.18.1.jar" -o plugins/youtube-plugin-1.18.1.jar
+  wget -q "https://github.com/lavalink-devs/youtube-source/releases/download/1.18.1/youtube-plugin-1.18.1.jar" -O plugins/youtube-plugin-1.18.1.jar
 fi
 
 # 3. Jalankan Lavalink dan bot Node.js secara bersamaan
