@@ -1,15 +1,12 @@
-FROM eclipse-temurin:17-jre
-
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    python3 \
+    python-is-python3 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-
-RUN apt-get update && apt-get install -y wget && \
-    wget -q https://github.com/lavalink-devs/Lavalink/releases/latest/download/Lavalink.jar -O Lavalink.jar && \
-    mkdir -p plugins && \
-    wget -q "https://github.com/lavalink-devs/youtube-source/releases/download/1.18.1/youtube-plugin-1.18.1.jar" -O plugins/youtube-plugin-1.18.1.jar && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY application.yml .
-
-EXPOSE 2333
-
-CMD ["java", "-jar", "Lavalink.jar"]
+COPY . .
+RUN npm install
+RUN chmod +x start.sh
+EXPOSE 7860
+CMD ["./start.sh"]
