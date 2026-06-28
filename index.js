@@ -32,8 +32,8 @@ const express = require('express');
 
     const nodes = [{
         name: 'Server-External',
-        url: 'lava.g3v.co.uk:9008',
-        auth: 'lavalinklol',
+        url: 'lavalinkv4.serenetia.com:80',
+        auth: 'https://seretia.link/discord',
         secure: false
     }];
 
