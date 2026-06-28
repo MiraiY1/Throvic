@@ -32,7 +32,7 @@ const express = require('express');
 
     const nodes = [{
         name: 'Server-Sendiri',
-        url: 'GANTI_DENGAN_HOSTNAME_LAVALINK_KAMU:2333',
+        url: 'throvic.railway.internal:2333',
         auth: 'youshallnotpass',
         secure: false
     }];
