@@ -32,8 +32,8 @@ const express = require('express');
 
     const nodes = [{
         name: 'Server-External',
-        url: 'lavalink.jirayu.net:13592',
-        auth: 'youshallnotpass',
+        url: 'lava.g3v.co.uk:9008',
+        auth: 'lavalinklol',
         secure: false
     }];
 
