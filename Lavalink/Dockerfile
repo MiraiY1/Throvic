@@ -12,4 +12,4 @@ COPY application.yml .
 
 EXPOSE 2333
 
-CMD ["java", "-Xmx400M", "-jar", "Lavalink.jar"]
+CMD ["java", "-jar", "Lavalink.jar"]
