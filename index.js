@@ -31,9 +31,9 @@ const express = require('express');
     // ========================================================================
 
     const nodes = [{
-        name: 'Server-External',
-        url: 'lavalinkv4.serenetia.com:80',
-        auth: 'https://seretia.link/discord',
+        name: 'Server-Sendiri',
+        url: 'GANTI_DENGAN_HOSTNAME_LAVALINK_KAMU:2333',
+        auth: 'youshallnotpass',
         secure: false
     }];
 
