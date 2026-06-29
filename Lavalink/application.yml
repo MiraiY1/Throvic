@@ -32,8 +32,86 @@ plugins:
     allowDirectPlaylistIds: true
     clients:
       - WEB
-      - WEBREMIX
-      - TVHTML5EMBEDDED
+      - WEB_REMIX
+      - WEB_EMBEDDED_PLAYER
+      - ANDROID_VR
+    oauth:
+      enabled: true
+      refreshToken: "1//0g235nLj1uw51CgYIARAAGBASNwF-L9IrzHmFtg8iU6huUak93yefy3DF3ZloxMUI6UajKxtcHRiZ_Ywd6eR3-wmosh1-5wFF4Ak"server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false # Biarkan false karena nanti dikontrol oleh plugin eksternal
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+      channelMix: true
+      distortion: true
+      lowPass: true
+      rotation: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - WEB
+      - WEB_REMIX
+      - WEB_EMBEDDED_PLAYER
+      - ANDROID_VR
+    oauth:
+      enabled: true
+      refreshToken: "1//0g235nLj1uw51CgYIARAAGBASNwF-L9IrzHmFtg8iU6huUak93yefy3DF3ZloxMUI6UajKxtcHRiZ_Ywd6eR3-wmosh1-5wFF4Ak"server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false # Biarkan false karena nanti dikontrol oleh plugin eksternal
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+      channelMix: true
+      distortion: true
+      lowPass: true
+      rotation: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - WEB
+      - WEB_REMIX
+      - WEB_EMBEDDED_PLAYER
       - ANDROID_VR
     oauth:
       enabled: true
