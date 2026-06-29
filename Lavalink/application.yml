@@ -30,11 +30,6 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    clients:
-      - WEB
-      - WEB_REMIX
-      - WEB_EMBEDDED_PLAYER
-      - ANDROID_VR
     oauth:
       enabled: true
       refreshToken: "1//0g235nLj1uw51CgYIARAAGBASNwF-L9IrzHmFtg8iU6huUak93yefy3DF3ZloxMUI6UajKxtcHRiZ_Ywd6eR3-wmosh1-5wFF4Ak"
