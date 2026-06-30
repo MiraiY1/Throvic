@@ -44,10 +44,24 @@ const express = require('express');
             const guild = client.guilds.cache.get(id);
             if (guild) guild.shard.send(payload);
         }
-    }, new Connectors.DiscordJS(client), nodes); // <-- SEKARANG SUDAH SINKRON PAKAI HURUFI KECIL
+    }, new Connectors.DiscordJS(client), nodes, {
+        moveOnDisconnect: false,
+        resumable: false,
+        reconnectTries: 15,
+        reconnectInterval: 5000,
+        restTimeout: 60000
+    });
 
     kazagumo.shoukaku.on('error', (name, error) => {
         console.error(`[Lavalink Error] Server "${name}" mengalami masalah:`, error);
+    });
+
+    kazagumo.shoukaku.on('ready', (name) => {
+        console.log(`✅ Lavalink node "${name}" siap dan terkoneksi!`);
+    });
+
+    kazagumo.shoukaku.on('disconnect', (name) => {
+        console.warn(`⚠️ Lavalink node "${name}" terputus, mencoba reconnect otomatis...`);
     });
 
     function formatDurasi(ms) {
@@ -459,3 +473,10 @@ const express = require('express');
         process.exit(1);
     }
     client.login(process.env.DISCORD_TOKEN);
+
+    process.on('unhandledRejection', (err) => {
+        console.error('Unhandled Rejection:', err);
+    });
+    process.on('uncaughtException', (err) => {
+        console.error('Uncaught Exception:', err);
+    });
