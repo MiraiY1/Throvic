@@ -38,6 +38,31 @@ const nodeSiap = (nodes) => [...nodes.values()]
     .filter(n => n.state === 1 /* CONNECTED */ && !isBad(n.name))
     .sort((a, b) => a.penalties - b.penalties);
 
+// Node publik cadangan (diambil dari lavalink-list.ajieblogs.eu.org, Nov 2026).
+// Dipakai bersama node dari env LAVALINK_NODES. Matikan dengan LAVALINK_DEFAULTS=off.
+const DEFAULT_NODES = [
+    {"name": "millohost-id", "url": "lava-v4.millohost.my.id:443", "auth": "https://discord.gg/mjS5J2K3ep", "secure": true},
+    {"name": "jirayu-th", "url": "lavalink.jirayu.net:443", "auth": "youshallnotpass", "secure": true},
+    {"name": "nazha", "url": "lavalink.nazha.online:443", "auth": "nazhafreelava", "secure": true},
+    {"name": "g3v-uk", "url": "lava.g3v.co.uk:9008", "auth": "lavalinklol", "secure": false},
+    {"name": "nexcloud", "url": "n3.nexcloud.in:2026", "auth": "nexcloud", "secure": false},
+    {"name": "vexanode", "url": "omega.vexanode.cloud:2031", "auth": "https://discord.vexanode.cloud", "secure": false},
+    {"name": "kasawa", "url": "lava2.kasawa.pro:2334", "auth": "youshallnotpass", "secure": false},
+    {"name": "minecuta", "url": "lavav4.minecuta.com:2333", "auth": "discord.gg/gKuXdHs", "secure": false}
+];
+
+function gabungNodes(dariEnv) {
+    const hasil = [...dariEnv];
+    if (String(process.env.LAVALINK_DEFAULTS || '').toLowerCase() === 'off') return hasil;
+    const sudahAda = new Set(hasil.map(n => n.url.toLowerCase()));
+    const namaDipakai = new Set(hasil.map(n => n.name));
+    for (const n of DEFAULT_NODES) {
+        if (sudahAda.has(n.url.toLowerCase())) continue;
+        hasil.push({ ...n, name: namaDipakai.has(n.name) ? `${n.name}-def` : n.name });
+    }
+    return hasil;
+}
+
 function parseNodes(raw) {
     if (!raw) return [];
     try {
@@ -71,7 +96,8 @@ const hapusNanti = (msg, ms = 5000) => {
 
 function startMusicBot() {
     const token = process.env.DISCORD_TOKEN;
-    const nodes = parseNodes(process.env.LAVALINK_NODES);
+    const nodes = gabungNodes(parseNodes(process.env.LAVALINK_NODES));
+    console.log(`[MusicBot] ${nodes.length} node Lavalink dikonfigurasi`);
     const CHANNEL_MUSIK_ID = process.env.MUSIC_CHANNEL_ID || DEFAULT_CHANNEL_MUSIK_ID;
     const SEARCH_ENGINE = process.env.MUSIC_SEARCH_ENGINE || 'youtube';
 
