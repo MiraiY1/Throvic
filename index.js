@@ -447,10 +447,77 @@ function startMusicBot() {
         }
     });
 
+    // ---------------- FAILOVER NODE ----------------
+    // Node publik kadang "mulai" memutar tapi audionya tidak jalan (posisi diam di 0).
+    // Kalau begitu, player dipindah ke node lain dan lagu dilanjutkan.
+    const watchdogs = new Map();   // guildId -> timeout
+    const percobaan = new Map();   // guildId -> jumlah pindah node berturut-turut
+    const WATCHDOG_MS = 15000;
+
+    const hentikanWatchdog = (guildId) => {
+        if (watchdogs.has(guildId)) { clearTimeout(watchdogs.get(guildId)); watchdogs.delete(guildId); }
+    };
+
+    async function pindahNode(player, alasan) {
+        hentikanWatchdog(player.guildId);
+        const namaLama = player.shoukaku?.node?.name;
+        if (namaLama) markBad(namaLama, alasan);
+
+        const ke = (percobaan.get(player.guildId) || 0) + 1;
+        percobaan.set(player.guildId, ke);
+        const channel = client.channels.cache.get(player.textId);
+
+        if (ke > kazagumo.shoukaku.nodes.size) {
+            percobaan.delete(player.guildId);
+            console.error(`[MusicBot] Semua node gagal untuk guild ${player.guildId}`);
+            hapusNanti(await channel?.send('❌ Semua server musik sedang bermasalah. Coba lagi beberapa menit lagi.').catch(() => null), 8000);
+            player.destroy();
+            return;
+        }
+
+        try {
+            const pindah = await player.shoukaku.move();
+            if (!pindah) throw new Error('tidak ada node lain yang siap');
+            console.log(`[MusicBot] 🔁 Guild ${player.guildId} pindah dari "${namaLama}" ke "${player.shoukaku.node.name}"`);
+            mulaiWatchdog(player);
+        } catch (e) {
+            console.error('[MusicBot] Gagal pindah node:', e?.message || e);
+            percobaan.delete(player.guildId);
+            hapusNanti(await channel?.send('❌ Server musik sedang bermasalah. Coba kirim lagunya lagi.').catch(() => null), 8000);
+            player.destroy();
+        }
+    }
+
+    function mulaiWatchdog(player) {
+        hentikanWatchdog(player.guildId);
+        const trackAwal = player.queue.current?.identifier;
+        const timer = setTimeout(() => {
+            watchdogs.delete(player.guildId);
+            const aktif = kazagumo.players.get(player.guildId);
+            if (!aktif || aktif.paused || aktif.queue.current?.identifier !== trackAwal) return;
+            if ((aktif.shoukaku?.position || 0) < 1000) {
+                pindahNode(aktif, 'audio tidak jalan (posisi diam)').catch(e => console.error('[MusicBot] failover error:', e));
+            } else {
+                percobaan.delete(player.guildId); // node ini berfungsi
+            }
+        }, WATCHDOG_MS);
+        watchdogs.set(player.guildId, timer);
+    }
+
     // ---------------- EVENTS KAZAGUMO ----------------
     kazagumo.on('playerStart', async (player) => {
         clearIdleTimer(player.guildId);
+        mulaiWatchdog(player);
         await updatePanel(buatPanelPlayer(player));
+    });
+
+    kazagumo.on('playerStuck', (player, data) => {
+        console.warn('[MusicBot] Track stuck:', data?.thresholdMs);
+        pindahNode(player, 'track stuck').catch(e => console.error('[MusicBot] failover error:', e));
+    });
+
+    kazagumo.on('playerClosed', (player, data) => {
+        console.warn(`[MusicBot] Voice websocket ditutup (code ${data?.code}): ${data?.reason || ''}`);
     });
 
     kazagumo.on('playerEnd', (player) => {
@@ -468,12 +535,22 @@ function startMusicBot() {
         }, 500);
     });
 
-    kazagumo.on('playerDestroy', async () => {
+    kazagumo.on('playerDestroy', async (player) => {
+        hentikanWatchdog(player.guildId);
         await updatePanel(buatPanelStandby());
     });
 
     kazagumo.on('playerException', (player, data) => {
-        console.error('[MusicBot] Track exception:', data?.exception?.message || data);
+        const pesan = data?.exception?.message || JSON.stringify(data);
+        console.error(`[MusicBot] Track exception di node "${player.shoukaku?.node?.name}":`, pesan);
+        // Jangan pindah node di sini: Kazagumo sudah otomatis lanjut ke lagu berikutnya.
+        // Cukup tandai node-nya supaya permintaan berikutnya memakai node lain.
+        hentikanWatchdog(player.guildId);
+        const nama = player.shoukaku?.node?.name;
+        if (nama) markBad(nama, `track exception: ${pesan}`);
+        const channel = client.channels.cache.get(player.textId);
+        channel?.send('⚠️ Lagu gagal diputar di server musik ini. Kirim ulang judulnya, nanti dicoba lewat server lain.')
+            .then(m => hapusNanti(m, 8000)).catch(() => null);
     });
 
     kazagumo.on('queueEnd', async (player) => {
