@@ -349,7 +349,12 @@ function startMusicBot() {
             }
 
             await updatePanel(buatPanelPlayer(player));
-            if (!player.playing && !player.paused) player.play();
+            if (!player.playing && !player.paused) {
+                // Mulai pengecekan sekarang juga: ada node yang tidak pernah kirim sinyal "mulai".
+                Promise.resolve(player.play())
+                    .catch(e => pindahNode(player, `play ditolak: ${e?.status || ''} ${e?.message || e}`.trim()));
+                mulaiWatchdog(player);
+            }
             await statusMsg?.delete().catch(() => null);
         } catch (err) {
             console.error('[MusicBot] Gagal memproses lagu:', err);
