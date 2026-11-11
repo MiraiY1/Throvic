@@ -20,6 +20,23 @@ const spotifyGet = spotifyUrlInfo(globalThis.fetch);
 
 const DEFAULT_CHANNEL_MUSIK_ID = '1508464931735863487';
 const IDLE_DISCONNECT_MS = 5 * 60 * 1000;
+const BAD_NODE_COOLDOWN_MS = 30 * 60 * 1000; // node yang menolak (403 dll) diistirahatkan 30 menit
+
+// Node publik kadang mau konek tapi menolak memutar (403). Node seperti itu dilewati sementara.
+const badNodes = new Map(); // name -> sampai kapan diblok
+const isBad = (name) => {
+    const until = badNodes.get(name);
+    if (!until) return false;
+    if (Date.now() > until) { badNodes.delete(name); return false; }
+    return true;
+};
+const markBad = (name, reason) => {
+    badNodes.set(name, Date.now() + BAD_NODE_COOLDOWN_MS);
+    console.warn(`[MusicBot] ⛔ Node "${name}" dilewati 30 menit: ${reason}`);
+};
+const nodeSiap = (nodes) => [...nodes.values()]
+    .filter(n => n.state === 1 /* CONNECTED */ && !isBad(n.name))
+    .sort((a, b) => a.penalties - b.penalties);
 
 function parseNodes(raw) {
     if (!raw) return [];
@@ -89,7 +106,28 @@ function startMusicBot() {
         reconnectTries: 15,
         reconnectInterval: 5,     // detik (Shoukaku v4)
         restTimeout: 60,          // detik (Shoukaku v4)
+        nodeResolver: (nodes) => nodeSiap(nodes)[0],
     });
+
+    // Buat player, coba node satu per satu sampai ada yang mau.
+    async function buatPlayerDenganFallback(opts) {
+        const ada = kazagumo.players.get(opts.guildId);
+        if (ada) return ada;
+        const kandidat = nodeSiap(kazagumo.shoukaku.nodes);
+        if (kandidat.length === 0) throw new Error('Tidak ada node Lavalink yang bisa dipakai saat ini');
+        let errTerakhir;
+        for (const node of kandidat) {
+            try {
+                const player = await kazagumo.createPlayer({ ...opts, nodeName: node.name });
+                console.log(`[MusicBot] ▶️ Player guild ${opts.guildId} memakai node "${node.name}"`);
+                return player;
+            } catch (e) {
+                errTerakhir = e;
+                markBad(node.name, `${e?.status || ''} ${e?.message || e}`.trim());
+            }
+        }
+        throw errTerakhir;
+    }
 
     kazagumo.shoukaku.on('error', (name, error) => console.error(`[MusicBot] Node "${name}" error:`, error?.message || error));
     kazagumo.shoukaku.on('ready', (name) => console.log(`[MusicBot] ✅ Node "${name}" terhubung`));
@@ -272,12 +310,13 @@ function startMusicBot() {
                 return hapusNanti(statusMsg);
             }
 
-            const player = await kazagumo.createPlayer({
+            const player = await buatPlayerDenganFallback({
                 guildId,
                 textId: textChannel.id,
                 voiceId: voiceChannel.id,
                 deaf: true,
             });
+            const nodePlayer = player.shoukaku?.node?.name;
 
             if (typeof player.skalaVolume === 'undefined') {
                 player.skalaVolume = 5;
@@ -288,13 +327,13 @@ function startMusicBot() {
                 await statusMsg?.edit(`⏳ Sedang memasukkan lagu dari **${namaPlaylist}** ke antrean...`).catch(() => null);
                 let masuk = 0;
                 for (const teks of susunanLagu) {
-                    const res = await kazagumo.search(teks, { requester: member.user, engine: SEARCH_ENGINE }).catch(() => null);
+                    const res = await kazagumo.search(teks, { requester: member.user, engine: SEARCH_ENGINE, nodeName: nodePlayer }).catch(() => null);
                     if (res?.tracks?.length) { player.queue.add(res.tracks[0]); masuk++; }
                 }
                 const notif = await textChannel.send(`✅ Sukses memuat **${masuk}/${susunanLagu.length} lagu** dari Spotify **${namaPlaylist}**!`).catch(() => null);
                 hapusNanti(notif);
             } else {
-                const res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: SEARCH_ENGINE });
+                const res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: SEARCH_ENGINE, nodeName: nodePlayer });
                 if (!res?.tracks?.length) {
                     await statusMsg?.edit('❌ Audio tidak ditemukan. Node Lavalink mungkin sedang bermasalah dengan sumber ini.').catch(() => null);
                     if (!player.queue.current && player.queue.length === 0) player.destroy();
@@ -320,7 +359,7 @@ function startMusicBot() {
     }
 
     // ---------------- EVENTS DISCORD ----------------
-    client.once('ready', async () => {
+    client.once('clientReady', async () => {
         console.log(`[MusicBot] ✅ Online sebagai ${client.user.tag}`);
         client.user.setActivity('ThroveFM Audio Stream', { type: 2 });
 
