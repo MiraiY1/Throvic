@@ -11,7 +11,7 @@
 // ============================================================================
 
 const express = require('express');
-const { Client, GatewayIntentBits, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const { Connectors } = require('shoukaku');
 const { Kazagumo, Plugins } = require('kazagumo');
 const spotifyUrlInfo = require('spotify-url-info');
@@ -31,8 +31,10 @@ const isBad = (name) => {
     return true;
 };
 const markBad = (name, reason) => {
-    badNodes.set(name, Date.now() + BAD_NODE_COOLDOWN_MS);
-    console.warn(`[MusicBot] ⛔ Node "${name}" dilewati 30 menit: ${reason}`);
+    // 403 biasanya kebijakan node (bot kita tidak diizinkan) → istirahat 6 jam, selain itu 30 menit.
+    const lama = /\b403\b/.test(String(reason)) ? 6 * 60 * 60 * 1000 : BAD_NODE_COOLDOWN_MS;
+    badNodes.set(name, Date.now() + lama);
+    console.warn(`[MusicBot] ⛔ Node "${name}" dilewati ${Math.round(lama / 60000)} menit: ${reason}`);
 };
 const nodeSiap = (nodes) => [...nodes.values()]
     .filter(n => n.state === 1 /* CONNECTED */ && !isBad(n.name))
@@ -135,10 +137,28 @@ function startMusicBot() {
         nodeResolver: (nodes) => nodeSiap(nodes)[0],
     });
 
+    // Hapus player dengan paksa. Kalau node menolak (403/429), Kazagumo bisa meninggalkan
+    // player "basi" (sudah keluar voice tapi masih tercatat) — itu yang bikin bot macet.
+    async function hancurkan(guildId) {
+        hentikanWatchdog(guildId);
+        const p = kazagumo.players.get(guildId);
+        if (p) {
+            try { await p.destroy(); }
+            catch (e) { console.warn('[MusicBot] destroy ditolak node (diabaikan):', e?.status || e?.message || e); }
+        }
+        kazagumo.players.delete(guildId);
+        try { kazagumo.shoukaku.connections.get(guildId)?.disconnect(); } catch { /* abaikan */ }
+        kazagumo.shoukaku.connections.delete(guildId);
+        kazagumo.shoukaku.players.delete(guildId);
+    }
+
+    const playerBasi = (p) => !p.voiceId || p.state >= 2 /* DISCONNECTING/DISCONNECTED/DESTROY* */;
+
     // Buat player, coba node satu per satu sampai ada yang mau.
     async function buatPlayerDenganFallback(opts) {
         const ada = kazagumo.players.get(opts.guildId);
-        if (ada) return ada;
+        if (ada && !playerBasi(ada)) return ada;
+        if (ada) await hancurkan(opts.guildId);
         const kandidat = nodeSiap(kazagumo.shoukaku.nodes);
         if (kandidat.length === 0) throw new Error('Tidak ada node Lavalink yang bisa dipakai saat ini');
         let errTerakhir;
@@ -181,7 +201,8 @@ function startMusicBot() {
             try {
                 const aktif = kazagumo.players.get(player.guildId);
                 if (aktif) {
-                    aktif.destroy();
+                    await hancurkan(player.guildId);
+                    await updatePanel(buatPanelStandby());
                 } else {
                     const guild = client.guilds.cache.get(player.guildId);
                     if (guild?.members.me?.voice.channelId) guild.members.me.voice.disconnect().catch(() => null);
@@ -362,7 +383,7 @@ function startMusicBot() {
                 const res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: SEARCH_ENGINE, nodeName: nodePlayer });
                 if (!res?.tracks?.length) {
                     await statusMsg?.edit('❌ Audio tidak ditemukan. Node Lavalink mungkin sedang bermasalah dengan sumber ini.').catch(() => null);
-                    if (!player.queue.current && player.queue.length === 0) player.destroy();
+                    if (!player.queue.current && player.queue.length === 0) await hancurkan(guildId);
                     return hapusNanti(statusMsg);
                 }
                 if (res.type === 'PLAYLIST') {
@@ -425,11 +446,18 @@ function startMusicBot() {
         try {
             if (!interaction.isButton() || !interaction.guild) return;
 
-            const player = kazagumo.players.get(interaction.guild.id);
-            if (!player) return;
+            let player = kazagumo.players.get(interaction.guild.id);
+            if (player && playerBasi(player)) {
+                await hancurkan(interaction.guild.id);
+                await updatePanel(buatPanelStandby());
+                player = null;
+            }
+            if (!player) {
+                return interaction.reply({ content: '💤 Tidak ada lagu yang sedang diputar. Ketik judul lagu di channel ini.', flags: MessageFlags.Ephemeral }).catch(() => null);
+            }
 
             if (!interaction.member.voice.channel || interaction.member.voice.channel.id !== player.voiceId) {
-                return interaction.reply({ content: '❌ Kamu harus berada di Voice Channel yang sama untuk mengontrol musik!', ephemeral: true });
+                return interaction.reply({ content: '❌ Kamu harus berada di Voice Channel yang sama untuk mengontrol musik!', flags: MessageFlags.Ephemeral });
             }
 
             await interaction.deferUpdate();
@@ -490,32 +518,64 @@ function startMusicBot() {
     };
 
     async function pindahNode(player, alasan) {
-        hentikanWatchdog(player.guildId);
+        const guildId = player.guildId;
+        hentikanWatchdog(guildId);
         const namaLama = player.shoukaku?.node?.name;
         if (namaLama) markBad(namaLama, alasan);
 
-        const ke = (percobaan.get(player.guildId) || 0) + 1;
-        percobaan.set(player.guildId, ke);
+        const ke = (percobaan.get(guildId) || 0) + 1;
+        percobaan.set(guildId, ke);
         const channel = client.channels.cache.get(player.textId);
 
-        if (ke > kazagumo.shoukaku.nodes.size) {
-            percobaan.delete(player.guildId);
-            console.error(`[MusicBot] Semua node gagal untuk guild ${player.guildId}`);
+        // Simpan keadaan sebelum player lama dihapus
+        const simpan = {
+            textId: player.textId,
+            voiceId: player.voiceId,
+            current: player.queue.current,
+            sisa: [...player.queue],
+            loop: player.loopMode || 'none',
+            vol: typeof player.skalaVolume === 'number' ? player.skalaVolume : 5,
+        };
+        await hancurkan(guildId);
+
+        if (ke > Math.min(kazagumo.shoukaku.nodes.size, 5) || !simpan.voiceId || !simpan.current) {
+            percobaan.delete(guildId);
+            console.error(`[MusicBot] Failover berhenti untuk guild ${guildId} (percobaan ${ke})`);
             hapusNanti(await channel?.send('❌ Semua server musik sedang bermasalah. Coba lagi beberapa menit lagi.').catch(() => null), 8000);
-            player.destroy();
+            await updatePanel(buatPanelStandby());
             return;
         }
 
         try {
-            const pindah = await player.shoukaku.move();
-            if (!pindah) throw new Error('tidak ada node lain yang siap');
-            console.log(`[MusicBot] 🔁 Guild ${player.guildId} pindah dari "${namaLama}" ke "${player.shoukaku.node.name}"`);
-            mulaiWatchdog(player);
+            const baru = await buatPlayerDenganFallback({ guildId, textId: simpan.textId, voiceId: simpan.voiceId, deaf: true });
+            const nodeBaru = baru.shoukaku?.node?.name;
+            baru.skalaVolume = simpan.vol;
+            baru.setVolume(simpan.vol * 10);
+            baru.loopMode = simpan.loop;
+
+            // Cari ulang lagu yang sedang diputar lewat node baru
+            let track = simpan.current;
+            const res = await kazagumo.search(simpan.current.uri || simpan.current.title,
+                { requester: simpan.current.requester, engine: SEARCH_ENGINE, nodeName: nodeBaru }).catch(() => null);
+            if (res?.tracks?.length) track = res.tracks[0];
+            baru.queue.add(track);
+            for (const t of simpan.sisa) baru.queue.add(t);
+            if (simpan.loop !== 'none') baru.setLoop(simpan.loop);
+
+            console.log(`[MusicBot] 🔁 Guild ${guildId} pindah dari "${namaLama}" ke "${nodeBaru}"`);
+            await updatePanel(buatPanelPlayer(baru));
+            await baru.play();
+            mulaiWatchdog(baru);
         } catch (e) {
-            console.error('[MusicBot] Gagal pindah node:', e?.message || e);
-            percobaan.delete(player.guildId);
-            hapusNanti(await channel?.send('❌ Server musik sedang bermasalah. Coba kirim lagunya lagi.').catch(() => null), 8000);
-            player.destroy();
+            console.error('[MusicBot] Gagal pindah node:', e?.status || '', e?.message || e);
+            const p = kazagumo.players.get(guildId);
+            if (p) {
+                pindahNode(p, `gagal setelah pindah: ${e?.status || ''} ${e?.message || e}`.trim()).catch(() => null);
+            } else {
+                percobaan.delete(guildId);
+                hapusNanti(await channel?.send('❌ Server musik sedang bermasalah. Coba kirim lagunya lagi.').catch(() => null), 8000);
+                await updatePanel(buatPanelStandby());
+            }
         }
     }
 
