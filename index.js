@@ -31,14 +31,25 @@ const isBad = (name) => {
     return true;
 };
 const markBad = (name, reason) => {
-    // 403 biasanya kebijakan node (bot kita tidak diizinkan) → istirahat 6 jam, selain itu 30 menit.
-    const lama = /\b403\b/.test(String(reason)) ? 6 * 60 * 60 * 1000 : BAD_NODE_COOLDOWN_MS;
+    // 403 = kebijakan node (bot tidak diizinkan) → 6 jam. 429 = cuma kebanyakan request → 1 menit.
+    const r = String(reason);
+    const lama = /\b403\b/.test(r) ? 6 * 60 * 60 * 1000
+        : /\b429\b/.test(r) ? 60 * 1000
+        : BAD_NODE_COOLDOWN_MS;
     badNodes.set(name, Date.now() + lama);
     console.warn(`[MusicBot] ⛔ Node "${name}" dilewati ${Math.round(lama / 60000)} menit: ${reason}`);
 };
-const nodeSiap = (nodes) => [...nodes.values()]
-    .filter(n => n.state === 1 /* CONNECTED */ && !isBad(n.name))
-    .sort((a, b) => a.penalties - b.penalties);
+const nodeSiap = (nodes) => {
+    const tersambung = [...nodes.values()].filter(n => n.state === 1 /* CONNECTED */);
+    const bagus = tersambung.filter(n => !isBad(n.name)).sort((a, b) => a.penalties - b.penalties);
+    if (bagus.length) return bagus;
+    // Semua sedang "diistirahatkan": tetap coba, mulai dari yang paling cepat selesai istirahatnya.
+    // Lebih baik mencoba daripada bot macet sampai harus redeploy.
+    return tersambung.sort((a, b) => (badNodes.get(a.name) || 0) - (badNodes.get(b.name) || 0));
+};
+const tidur = (ms) => new Promise(r => setTimeout(r, ms));
+const MAKS_PLAYLIST = 200;     // batas lagu per playlist Spotify
+const JEDA_CARI_MS = 800;      // jeda antar pencarian supaya node tidak menganggap spam
 
 // Node publik cadangan (diambil dari lavalink-list.ajieblogs.eu.org, Nov 2026).
 // Dipakai bersama node dari env LAVALINK_NODES. Matikan dengan LAVALINK_DEFAULTS=off.
@@ -312,6 +323,42 @@ function startMusicBot() {
         return { embeds: [embed], components: [new ActionRowBuilder().addComponents(nav), rowVolume] };
     };
 
+    // ---------------- PENCARIAN & PLAYLIST ----------------
+    // Kazagumo menelan error REST saat search (hasilnya kosong), jadi kosong = coba lagi sekali setelah jeda.
+    async function cariLagu(teks, requester, nodeName) {
+        for (let coba = 0; coba < 2; coba++) {
+            const res = await kazagumo.search(teks, { requester, engine: SEARCH_ENGINE, nodeName }).catch(() => null);
+            if (res?.tracks?.length) return res;
+            if (coba === 0) await tidur(3000);
+        }
+        return null;
+    }
+
+    async function muatSisaPlaylist(player, sisa, requester, namaPlaylist, textChannel, total) {
+        let masuk = 1;
+        let gagalBeruntun = 0;
+        for (const teks of sisa) {
+            await tidur(JEDA_CARI_MS);
+            const aktif = kazagumo.players.get(player.guildId);
+            if (!aktif) return; // player sudah dihapus / di-stop
+            const res = await cariLagu(teks, requester, aktif.shoukaku?.node?.name);
+            if (res?.tracks?.length) {
+                aktif.queue.add(res.tracks[0]);
+                masuk++;
+                gagalBeruntun = 0;
+                if (masuk % 10 === 0) await updatePanel(buatPanelPlayer(aktif));
+            } else if (++gagalBeruntun >= 5) {
+                // Node kemungkinan sedang membatasi kita — istirahat sebentar lalu lanjut
+                console.warn('[MusicBot] Pencarian playlist gagal beruntun, jeda 20 detik');
+                await tidur(20000);
+                gagalBeruntun = 0;
+            }
+        }
+        const aktif = kazagumo.players.get(player.guildId);
+        if (aktif?.queue.current) await updatePanel(buatPanelPlayer(aktif));
+        hapusNanti(await textChannel.send(`✅ Selesai memuat **${masuk}/${total} lagu** dari Spotify **${namaPlaylist}**.`).catch(() => null), 8000);
+    }
+
     // ---------------- PROSES LAGU ----------------
     async function prosesInputLagu(guildId, textChannel, member, query) {
         const voiceChannel = member.voice.channel;
@@ -371,14 +418,24 @@ function startMusicBot() {
             }
 
             if (isSpotify && namaPlaylist) {
-                await statusMsg?.edit(`⏳ Sedang memasukkan lagu dari **${namaPlaylist}** ke antrean...`).catch(() => null);
-                let masuk = 0;
-                for (const teks of susunanLagu) {
-                    const res = await kazagumo.search(teks, { requester: member.user, engine: SEARCH_ENGINE, nodeName: nodePlayer }).catch(() => null);
-                    if (res?.tracks?.length) { player.queue.add(res.tracks[0]); masuk++; }
+                // Cari lagu pertama dulu supaya musik langsung jalan; sisanya dimuat pelan-pelan di latar belakang.
+                const daftar = susunanLagu.slice(0, MAKS_PLAYLIST);
+                let pertama = null;
+                let idx = 0;
+                while (idx < daftar.length && !pertama && idx < 5) {
+                    const res = await cariLagu(daftar[idx++], member.user, nodePlayer);
+                    if (res?.tracks?.length) pertama = res.tracks[0];
                 }
-                const notif = await textChannel.send(`✅ Sukses memuat **${masuk}/${susunanLagu.length} lagu** dari Spotify **${namaPlaylist}**!`).catch(() => null);
-                hapusNanti(notif);
+                if (!pertama) {
+                    await statusMsg?.edit('❌ Lagu dari playlist itu tidak ditemukan. Server musik mungkin sedang sibuk, coba lagi sebentar lagi.').catch(() => null);
+                    if (!player.queue.current && player.queue.length === 0) await hancurkan(guildId);
+                    return hapusNanti(statusMsg);
+                }
+                player.queue.add(pertama);
+                const info = susunanLagu.length > MAKS_PLAYLIST ? ` (dibatasi ${MAKS_PLAYLIST} lagu pertama)` : '';
+                hapusNanti(await textChannel.send(`⏳ Memutar lagu pertama dari **${namaPlaylist}**. ${daftar.length - 1} lagu lainnya dimuat bertahap${info}...`).catch(() => null), 8000);
+                muatSisaPlaylist(player, daftar.slice(idx), member.user, namaPlaylist, textChannel, daftar.length)
+                    .catch(e => console.error('[MusicBot] Gagal memuat sisa playlist:', e));
             } else {
                 const res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: SEARCH_ENGINE, nodeName: nodePlayer });
                 if (!res?.tracks?.length) {
@@ -398,8 +455,16 @@ function startMusicBot() {
             await updatePanel(buatPanelPlayer(player));
             if (!player.playing && !player.paused) {
                 // Mulai pengecekan sekarang juga: ada node yang tidak pernah kirim sinyal "mulai".
-                Promise.resolve(player.play())
-                    .catch(e => pindahNode(player, `play ditolak: ${e?.status || ''} ${e?.message || e}`.trim()));
+                Promise.resolve(player.play()).catch(async (e) => {
+                    if (e?.status === 429) {
+                        // Cuma dibatasi sementara: tunggu lalu coba lagi di node yang sama
+                        await tidur(5000);
+                        if (kazagumo.players.get(guildId) !== player) return;
+                        return Promise.resolve(player.play()).catch(e2 =>
+                            pindahNode(player, `play ditolak: ${e2?.status || ''} ${e2?.message || e2}`.trim()));
+                    }
+                    return pindahNode(player, `play ditolak: ${e?.status || ''} ${e?.message || e}`.trim());
+                });
                 mulaiWatchdog(player);
             }
             await statusMsg?.delete().catch(() => null);
