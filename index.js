@@ -142,7 +142,7 @@ function startMusicBot() {
     }, new Connectors.DiscordJS(client), nodes, {
         moveOnDisconnect: true,   // node publik sering mati → pindahkan player ke node lain
         resume: false,
-        reconnectTries: 15,
+        reconnectTries: 3,        // cepat menyerah; penyambungan ulang diurus watchdog node di bawah
         reconnectInterval: 5,     // detik (Shoukaku v4)
         restTimeout: 60,          // detik (Shoukaku v4)
         nodeResolver: (nodes) => nodeSiap(nodes)[0],
@@ -170,6 +170,7 @@ function startMusicBot() {
         const ada = kazagumo.players.get(opts.guildId);
         if (ada && !playerBasi(ada)) return ada;
         if (ada) await hancurkan(opts.guildId);
+        await tungguNodeSiap();
         const kandidat = nodeSiap(kazagumo.shoukaku.nodes);
         if (kandidat.length === 0) throw new Error('Tidak ada node Lavalink yang bisa dipakai saat ini');
         let errTerakhir;
@@ -186,7 +187,48 @@ function startMusicBot() {
         throw errTerakhir;
     }
 
-    kazagumo.shoukaku.on('error', (name, error) => console.error(`[MusicBot] Node "${name}" error:`, error?.message || error));
+    // Log error node dibatasi 1x per 10 menit per node supaya log tidak banjir oleh node yang mati
+    const logErrorTerakhir = new Map();
+    kazagumo.shoukaku.on('error', (name, error) => {
+        const now = Date.now();
+        if (now - (logErrorTerakhir.get(name) || 0) < 10 * 60 * 1000) return;
+        logErrorTerakhir.set(name, now);
+        console.error(`[MusicBot] Node "${name}" error:`, error?.message || error);
+    });
+
+    // ---------------- WATCHDOG NODE ----------------
+    // Shoukaku MENGHAPUS node dari daftar untuk selamanya kalau gagal reconnect beberapa kali.
+    // Node publik sering putus-nyambung, jadi lama-lama semua node hilang → "Tidak ada node".
+    // Watchdog ini mendaftarkan ulang node yang hilang secara berkala.
+    function sambungUlangNode() {
+        let ditambah = 0;
+        for (const n of nodes) {
+            if (kazagumo.shoukaku.nodes.has(n.name)) continue;
+            try {
+                kazagumo.shoukaku.addNode({ name: n.name, url: n.url, auth: n.auth, secure: n.secure });
+                ditambah++;
+            } catch (e) {
+                console.error(`[MusicBot] Gagal mendaftarkan ulang node "${n.name}":`, e?.message || e);
+            }
+        }
+        return ditambah;
+    }
+    setInterval(() => {
+        const n = sambungUlangNode();
+        if (n) console.log(`[MusicBot] 🔌 Mendaftarkan ulang ${n} node yang terputus`);
+    }, 2 * 60 * 1000);
+
+    async function tungguNodeSiap(maksMs = 10000) {
+        if (nodeSiap(kazagumo.shoukaku.nodes).length) return true;
+        const n = sambungUlangNode();
+        console.log(`[MusicBot] Tidak ada node tersambung, mencoba ulang ${n} node...`);
+        const batas = Date.now() + maksMs;
+        while (Date.now() < batas) {
+            await tidur(1000);
+            if (nodeSiap(kazagumo.shoukaku.nodes).length) return true;
+        }
+        return false;
+    }
     kazagumo.shoukaku.on('ready', (name) => console.log(`[MusicBot] ✅ Node "${name}" terhubung`));
     kazagumo.shoukaku.on('disconnect', (name) => console.warn(`[MusicBot] ⚠️ Node "${name}" terputus`));
     client.on('error', (e) => console.error('[MusicBot] Client error:', e));
