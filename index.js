@@ -114,6 +114,19 @@ function startMusicBot() {
     const CHANNEL_MUSIK_ID = process.env.MUSIC_CHANNEL_ID || DEFAULT_CHANNEL_MUSIK_ID;
     const SEARCH_ENGINE = process.env.MUSIC_SEARCH_ENGINE || 'youtube';
 
+    // YouTube sering memblokir node publik ("Sign in to confirm you're not a bot").
+    // Saat itu terdeteksi, pencarian & pemutaran pindah ke SoundCloud selama 1 jam.
+    let ytDiblokirSampai = 0;
+    let sudahKabariBlokir = 0;
+    const youtubeDiblokir = () => Date.now() < ytDiblokirSampai;
+    const engineAktif = () => (youtubeDiblokir() && SEARCH_ENGINE.startsWith('youtube')) ? 'soundcloud' : SEARCH_ENGINE;
+    const tandaBlokirYouTube = /All clients failed|confirm you.?re not a bot|requires login|Sign in/i;
+
+    async function cariSoundCloud(teks, requester) {
+        const res = await kazagumo.search(teks, { requester, engine: 'soundcloud' }).catch(() => null);
+        return res?.tracks?.[0] || null;
+    }
+
     if (!token) {
         console.error('[MusicBot] DISCORD_TOKEN belum di-set! Tambahkan di Environment Render.');
         process.exit(1);
@@ -135,6 +148,21 @@ function startMusicBot() {
     const kazagumo = new Kazagumo({
         plugins: [new Plugins.PlayerMoved(client)],
         defaultSearchEngine: SEARCH_ENGINE,
+        // Dipanggil Kazagumo tepat sebelum lagu diputar. Kalau YouTube sedang memblokir node,
+        // lagu YouTube diganti versi SoundCloud dengan judul yang sama.
+        trackResolver: async function () {
+            if (this.sourceName !== 'youtube' || !youtubeDiblokir() || this._sudahDikonversi) return false;
+            this._sudahDikonversi = true;
+            const sc = await cariSoundCloud(this.author ? `${this.author} ${this.title}` : this.title, this.requester);
+            if (!sc) return false;
+            this.track = sc.track;
+            this.sourceName = 'soundcloud';
+            this.realUri = sc.uri;
+            this.uri = sc.uri;
+            this.length = sc.length;
+            console.log(`[MusicBot] 🔄 "${this.title}" diputar dari SoundCloud`);
+            return true;
+        },
         send: (id, payload) => {
             const guild = client.guilds.cache.get(id);
             if (guild) guild.shard.send(payload);
@@ -240,6 +268,111 @@ function startMusicBot() {
         if (!pesanPanelUtama) return;
         await pesanPanelUtama.edit(payload).catch(() => null);
     };
+
+    // ---------------- STATUS & PEMULIHAN OTOMATIS ----------------
+    // Pesan status di bawah panel: 🟢 Online / 🟡 Refreshing / 🔴 Restarting.
+    // Kalau server musik putus semua atau error terus berulang, bot memulihkan diri sendiri:
+    //   1) sambung ulang semua node (Refreshing)
+    //   2) kalau tetap gagal → proses keluar, Render otomatis menyalakan ulang (Restarting)
+    let pesanStatus = null;
+    let statusSekarang = { kode: 'starting', info: '' };
+    let statusSejak = Date.now();
+    let teksStatusTerakhir = '';
+    let sedangRestart = false;
+    const riwayatError = [];       // timestamp error pemutaran
+    let cekGagalBeruntun = 0;      // health check tanpa node tersambung
+
+    const nodeTersambung = () => [...kazagumo.shoukaku.nodes.values()].filter(n => n.state === 1).length;
+
+    function buatStatus() {
+        const gaya = {
+            online:     { warna: '#2ECC71', label: '🟢 Online' },
+            refreshing: { warna: '#F1C40F', label: '🟡 Refreshing' },
+            restarting: { warna: '#E74C3C', label: '🔴 Restarting' },
+            starting:   { warna: '#95A5A6', label: '⚪ Starting' },
+        }[statusSekarang.kode] || { warna: '#95A5A6', label: statusSekarang.kode };
+        const sumber = youtubeDiblokir() ? 'SoundCloud (YouTube sedang memblokir)' : (engineAktif() === 'soundcloud' ? 'SoundCloud' : 'YouTube');
+        const baris = [
+            `**Status:** ${gaya.label}`,
+            `**Server musik:** ${nodeTersambung()}/${nodes.length} tersambung`,
+            `**Sumber lagu:** ${sumber}`,
+        ];
+        if (statusSekarang.info) baris.push(`**Info:** ${statusSekarang.info}`);
+        baris.push(`-# Sejak <t:${Math.floor(statusSejak / 1000)}:R>`);
+        return { embeds: [new EmbedBuilder().setColor(gaya.warna).setDescription(baris.join('\n'))] };
+    }
+
+    async function setStatus(kode, info = '') {
+        if (kode !== statusSekarang.kode) statusSejak = Date.now();
+        statusSekarang = { kode, info };
+        const payload = buatStatus();
+        const teks = payload.embeds[0].data.description;
+        if (teks === teksStatusTerakhir || !pesanStatus) { teksStatusTerakhir = teks; return; }
+        teksStatusTerakhir = teks;
+        await pesanStatus.edit(payload).catch(() => null);
+    }
+
+    function segarkanNode() {
+        badNodes.clear();
+        for (const n of nodes) {
+            const ada = kazagumo.shoukaku.nodes.get(n.name);
+            if (ada && ada.state !== 1) {
+                try { kazagumo.shoukaku.removeNode(n.name, 'refresh'); } catch { /* abaikan */ }
+            }
+        }
+        return sambungUlangNode();
+    }
+
+    async function restartBot(alasan) {
+        if (sedangRestart) return;
+        sedangRestart = true;
+        console.error(`[MusicBot] 🔴 Restart otomatis: ${alasan}`);
+        await setStatus('restarting', `${alasan}. Bot akan kembali dalam ±1 menit.`);
+        await tidur(2000);
+        process.exit(1); // Render otomatis menyalakan ulang service yang berhenti
+    }
+
+    async function refresh(alasan) {
+        console.warn(`[MusicBot] 🟡 Refresh otomatis: ${alasan}`);
+        await setStatus('refreshing', alasan);
+        const n = segarkanNode();
+        console.log(`[MusicBot] Menyambung ulang ${n} node...`);
+        for (let i = 0; i < 15; i++) {
+            await tidur(1000);
+            if (nodeTersambung() > 0) break;
+        }
+        if (nodeTersambung() > 0) await setStatus('online');
+    }
+
+    // Dipanggil setiap kali pemutaran gagal total
+    function catatError(sumber) {
+        const now = Date.now();
+        riwayatError.push(now);
+        while (riwayatError.length && now - riwayatError[0] > 15 * 60 * 1000) riwayatError.shift();
+        const dalam10Menit = riwayatError.filter(t => now - t < 10 * 60 * 1000).length;
+        console.warn(`[MusicBot] Error tercatat (${sumber}): ${dalam10Menit} dalam 10 menit, ${riwayatError.length} dalam 15 menit`);
+        if (riwayatError.length >= 6) {
+            restartBot('Error terus berulang meski sudah di-refresh').catch(() => null);
+        } else if (dalam10Menit >= 3) {
+            refresh('Beberapa lagu gagal diputar, menyambung ulang server musik').catch(() => null);
+        }
+    }
+
+    // Cek kesehatan tiap menit
+    setInterval(async () => {
+        if (sedangRestart) return;
+        if (nodeTersambung() > 0) {
+            cekGagalBeruntun = 0;
+            await setStatus('online');
+            return;
+        }
+        cekGagalBeruntun++;
+        if (cekGagalBeruntun >= 4) {
+            await restartBot('Tidak ada server musik yang bisa tersambung');
+        } else {
+            await refresh(`Semua server musik terputus, menyambung ulang (percobaan ${cekGagalBeruntun}/3)`);
+        }
+    }, 60 * 1000);
 
     const clearIdleTimer = (guildId) => {
         if (timeoutsBahuMusik.has(guildId)) {
@@ -369,9 +502,13 @@ function startMusicBot() {
     // Kazagumo menelan error REST saat search (hasilnya kosong), jadi kosong = coba lagi sekali setelah jeda.
     async function cariLagu(teks, requester, nodeName) {
         for (let coba = 0; coba < 2; coba++) {
-            const res = await kazagumo.search(teks, { requester, engine: SEARCH_ENGINE, nodeName }).catch(() => null);
+            const res = await kazagumo.search(teks, { requester, engine: engineAktif(), nodeName }).catch(() => null);
             if (res?.tracks?.length) return res;
             if (coba === 0) await tidur(3000);
+        }
+        if (engineAktif() !== 'soundcloud') {
+            const sc = await kazagumo.search(teks, { requester, engine: 'soundcloud' }).catch(() => null);
+            if (sc?.tracks?.length) return sc;
         }
         return null;
     }
@@ -479,7 +616,10 @@ function startMusicBot() {
                 muatSisaPlaylist(player, daftar.slice(idx), member.user, namaPlaylist, textChannel, daftar.length)
                     .catch(e => console.error('[MusicBot] Gagal memuat sisa playlist:', e));
             } else {
-                const res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: SEARCH_ENGINE, nodeName: nodePlayer });
+                let res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: engineAktif(), nodeName: nodePlayer }).catch(() => null);
+                if (!res?.tracks?.length && engineAktif() !== 'soundcloud' && !/^https?:\/\//i.test(susunanLagu[0])) {
+                    res = await kazagumo.search(susunanLagu[0], { requester: member.user, engine: 'soundcloud', nodeName: nodePlayer }).catch(() => null);
+                }
                 if (!res?.tracks?.length) {
                     await statusMsg?.edit('❌ Audio tidak ditemukan. Node Lavalink mungkin sedang bermasalah dengan sumber ini.').catch(() => null);
                     if (!player.queue.current && player.queue.length === 0) await hancurkan(guildId);
@@ -512,6 +652,7 @@ function startMusicBot() {
             await statusMsg?.delete().catch(() => null);
         } catch (err) {
             console.error('[MusicBot] Gagal memproses lagu:', err);
+            catatError('gagal memproses lagu');
             await statusMsg?.delete().catch(() => null);
             hapusNanti(await textChannel.send('❌ Terjadi kesalahan saat memproses lagu.').catch(() => null));
         }
@@ -531,6 +672,12 @@ function startMusicBot() {
             const messages = await channel.messages.fetch({ limit: 50 });
             if (messages.size > 0) await channel.bulkDelete(messages, true).catch(() => null);
             pesanPanelUtama = await channel.send(buatPanelStandby());
+            await tidur(3000); // beri waktu node tersambung dulu
+            statusSekarang = { kode: nodeTersambung() > 0 ? 'online' : 'refreshing', info: nodeTersambung() > 0 ? '' : 'Menunggu server musik tersambung...' };
+            statusSejak = Date.now();
+            const awal = buatStatus();
+            teksStatusTerakhir = awal.embeds[0].data.description;
+            pesanStatus = await channel.send(awal);
         } catch (e) {
             console.error('[MusicBot] Gagal inisialisasi channel musik:', e);
         }
@@ -648,6 +795,7 @@ function startMusicBot() {
         if (ke > Math.min(kazagumo.shoukaku.nodes.size, 5) || !simpan.voiceId || !simpan.current) {
             percobaan.delete(guildId);
             console.error(`[MusicBot] Failover berhenti untuk guild ${guildId} (percobaan ${ke})`);
+            catatError('semua node gagal memutar');
             hapusNanti(await channel?.send('❌ Semua server musik sedang bermasalah. Coba lagi beberapa menit lagi.').catch(() => null), 8000);
             await updatePanel(buatPanelStandby());
             return;
@@ -663,7 +811,7 @@ function startMusicBot() {
             // Cari ulang lagu yang sedang diputar lewat node baru
             let track = simpan.current;
             const res = await kazagumo.search(simpan.current.uri || simpan.current.title,
-                { requester: simpan.current.requester, engine: SEARCH_ENGINE, nodeName: nodeBaru }).catch(() => null);
+                { requester: simpan.current.requester, engine: engineAktif(), nodeName: nodeBaru }).catch(() => null);
             if (res?.tracks?.length) track = res.tracks[0];
             baru.queue.add(track);
             for (const t of simpan.sisa) baru.queue.add(t);
@@ -740,13 +888,30 @@ function startMusicBot() {
 
     kazagumo.on('playerException', (player, data) => {
         const pesan = data?.exception?.message || JSON.stringify(data);
-        console.error(`[MusicBot] Track exception di node "${player.shoukaku?.node?.name}":`, pesan);
-        // Jangan pindah node di sini: Kazagumo sudah otomatis lanjut ke lagu berikutnya.
-        // Cukup tandai node-nya supaya permintaan berikutnya memakai node lain.
-        hentikanWatchdog(player.guildId);
+        const gagal = player.queue.current;
         const nama = player.shoukaku?.node?.name;
-        if (nama) markBad(nama, `track exception: ${pesan}`);
+        console.error(`[MusicBot] Track exception di node "${nama}":`, pesan);
+        hentikanWatchdog(player.guildId);
+
         const channel = client.channels.cache.get(player.textId);
+        if (gagal?.sourceName === 'youtube' && tandaBlokirYouTube.test(pesan)) {
+            // Bukan salah node — YouTube memblokir. Jangan tandai node; pakai SoundCloud.
+            ytDiblokirSampai = Date.now() + 60 * 60 * 1000;
+            if (!gagal._sudahDikonversi) {
+                // Masukkan lagi ke depan antrean SEKARANG (sinkron), sebelum Kazagumo lanjut ke lagu berikutnya.
+                // Saat diputar ulang, trackResolver akan menggantinya dengan versi SoundCloud.
+                player.queue.unshift(gagal);
+            }
+            if (Date.now() - sudahKabariBlokir > 10 * 60 * 1000) {
+                sudahKabariBlokir = Date.now();
+                channel?.send('⚠️ YouTube sedang memblokir server musik. Untuk sementara lagu diputar dari **SoundCloud** (judul sama, versinya bisa sedikit beda).')
+                    .then(m => hapusNanti(m, 15000)).catch(() => null);
+            }
+            return;
+        }
+
+        // Error lain: tandai node supaya permintaan berikutnya memakai node lain
+        if (nama) markBad(nama, `track exception: ${pesan}`);
         channel?.send('⚠️ Lagu gagal diputar di server musik ini. Kirim ulang judulnya, nanti dicoba lewat server lain.')
             .then(m => hapusNanti(m, 8000)).catch(() => null);
     });
